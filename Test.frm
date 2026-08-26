@@ -1,11 +1,11 @@
 VERSION 5.00
-Begin VB.UserForm ConnorMoier
+Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} ConnorMoier
    Caption = "ConnorMoier"
    ClientHeight = 4500
    ClientLeft = 45
    ClientTop = 390
    ClientWidth = 6000
-   StartUpPosition = 1
+   StartUpPosition = 1 'CenterOwner
    BackColor = &H00F0F0F0&
    ForeColor = &H00000000&
    BeginProperty Font
@@ -18,7 +18,7 @@ Begin VB.UserForm ConnorMoier
       Strikethrough = 0 'False
    EndProperty
    Begin MSForms.ToggleButton ToggleButton1
-      Caption = "MsgBox"
+      Caption = "Connor Moizer"
       Height = 480
       Left = 360
       Top = 360
@@ -45,5 +45,5 @@ Attribute VB_PredeclaredId = True
 Attribute VB_Exposed = False
 
 Private Sub UserForm_Initialize()
-MsgBox Test Code
+MsgBox "This is fun"
 End Sub
