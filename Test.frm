@@ -6,8 +6,12 @@ Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} ConnorMoier
    ClientTop = 390
    ClientWidth = 6000
    StartUpPosition = 1 'CenterOwner
-   BackColor = &H00F0F0F0&
+   BackColor = &H000505F0&
    ForeColor = &H00000000&
+   BorderColor = &H00222267&
+   BackStyle = 1
+   BorderStyle = 1
+   SpecialEffect = 0
    BeginProperty Font
       Name = "Arial"
       Size = 9
@@ -25,26 +29,14 @@ Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} ConnorMoier
       Width = 1650
       BackColor = &H00F0F0F0&
       ForeColor = &H00000000&
-      Enabled = -1 'True
-      Visible = -1 'True
-      BeginProperty Font
-         Name = "Arial"
-         Size = 9
-         Charset = 0
-         Weight = 400
-         Underline = 0 'False
-         Italic = 0 'False
-         Strikethrough = 0 'False
-      EndProperty
-   End
-   Begin MSForms.ToggleButton ToggleButton1
-      Caption = "Button 2 "
-      Height = 480
-      Left = 480
-      Top = 1080
-      Width = 1650
-      BackColor = &H00F0F0F0&
-      ForeColor = &H00000000&
+      BorderColor = &H00808080&
+      BackStyle = 1
+      BorderStyle = 1
+      SpecialEffect = 0
+      TextAlign = 1
+      WordWrap = -1 'True
+      TabIndex = 0
+      TabStop = -1 'True
       Enabled = -1 'True
       Visible = -1 'True
       BeginProperty Font
@@ -65,6 +57,14 @@ Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} ConnorMoier
       Width = 1650
       BackColor = &H00F0F0F0&
       ForeColor = &H00000000&
+      BorderColor = &H00808080&
+      BackStyle = 1
+      BorderStyle = 1
+      SpecialEffect = 0
+      TextAlign = 1
+      WordWrap = -1 'True
+      TabIndex = 2
+      TabStop = -1 'True
       Enabled = -1 'True
       Visible = -1 'True
       BeginProperty Font
@@ -85,6 +85,43 @@ Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} ConnorMoier
       Width = 1650
       BackColor = &H00F0F0F0&
       ForeColor = &H00000000&
+      BorderColor = &H00808080&
+      BackStyle = 1
+      BorderStyle = 1
+      SpecialEffect = 0
+      TextAlign = 1
+      WordWrap = -1 'True
+      TabIndex = 3
+      TabStop = -1 'True
+      Enabled = -1 'True
+      Visible = -1 'True
+      BeginProperty Font
+         Name = "Arial"
+         Size = 9
+         Charset = 0
+         Weight = 400
+         Underline = 0 'False
+         Italic = 0 'False
+         Strikethrough = 0 'False
+      EndProperty
+   End
+   Begin MSForms.Label DateTime1
+      Caption = "26/08/2026 15:06"
+      Tag = "CM_DATETIME:%7B%22m%22%3A%22Fixed%22%2C%22d%22%3A%22DateTime%22%2C%22f%22%3A%22UKShort%22%2C%22s%22%3Afalse%2C%22v%22%3A%222026-08-26T15%3A06%3A44%22%7D"
+      Height = 450
+      Left = 2640
+      Top = 480
+      Width = 2850
+      BackColor = &H00F0F0F0&
+      ForeColor = &H00000000&
+      BorderColor = &H00808080&
+      BackStyle = 1
+      BorderStyle = 1
+      SpecialEffect = 0
+      TextAlign = 1
+      WordWrap = -1 'True
+      TabIndex = 4
+      TabStop = -1 'True
       Enabled = -1 'True
       Visible = -1 'True
       BeginProperty Font
@@ -106,10 +143,6 @@ Attribute VB_Exposed = False
 
 Private Sub connormoizer_click()
 MsgBox "This is fun"
-End Sub
-
-Private Sub ToggleButton1_Click()
-MsgBox "Prompt 2 "
 End Sub
 
 Private Sub ToggleButton2_Click()
