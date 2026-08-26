@@ -17,7 +17,7 @@ Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} ConnorMoier
       Italic = 0 'False
       Strikethrough = 0 'False
    EndProperty
-   Begin MSForms.ToggleButton ToggleButton1
+   Begin MSForms.ToggleButton connor
       Caption = "Connor Moizer"
       Height = 480
       Left = 360
@@ -44,6 +44,6 @@ Attribute VB_Creatable = False
 Attribute VB_PredeclaredId = True
 Attribute VB_Exposed = False
 
-Private Sub UserForm_Initialize()
+Private Sub connor
 MsgBox "This is fun"
 End Sub
