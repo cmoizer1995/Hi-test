@@ -134,6 +134,34 @@ Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} ConnorMoier
          Strikethrough = 0 'False
       EndProperty
    End
+   Begin MSForms.ToggleButton ToggleButton1
+      Caption = "demo 3 "
+      Height = 480
+      Left = 2040
+      Top = 1080
+      Width = 1650
+      BackColor = &H00F0F0F0&
+      ForeColor = &H00000000&
+      BorderColor = &H00808080&
+      BackStyle = 1
+      BorderStyle = 1
+      SpecialEffect = 0
+      TextAlign = 1
+      WordWrap = -1 'True
+      TabIndex = 4
+      TabStop = -1 'True
+      Enabled = -1 'True
+      Visible = -1 'True
+      BeginProperty Font
+         Name = "Arial"
+         Size = 9
+         Charset = 0
+         Weight = 400
+         Underline = 0 'False
+         Italic = 0 'False
+         Strikethrough = 0 'False
+      EndProperty
+   End
 End
 Attribute VB_Name = "ConnorMoier"
 Attribute VB_GlobalNameSpace = False
@@ -151,4 +179,8 @@ End Sub
 
 Private Sub ToggleButton3_Click()
 Msgbox "My nameis connor moizer"
+End Sub
+
+Private Sub ToggleButton1_Click()
+msgbox"this is a test"
 End Sub
