@@ -37,6 +37,46 @@ Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} ConnorMoier
          Strikethrough = 0 'False
       EndProperty
    End
+   Begin MSForms.ToggleButton ToggleButton1
+      Caption = "Button 2 "
+      Height = 480
+      Left = 480
+      Top = 1080
+      Width = 1650
+      BackColor = &H00F0F0F0&
+      ForeColor = &H00000000&
+      Enabled = -1 'True
+      Visible = -1 'True
+      BeginProperty Font
+         Name = "Arial"
+         Size = 9
+         Charset = 0
+         Weight = 400
+         Underline = 0 'False
+         Italic = 0 'False
+         Strikethrough = 0 'False
+      EndProperty
+   End
+   Begin MSForms.ToggleButton ToggleButton2
+      Caption = "Button 3 "
+      Height = 480
+      Left = 2280
+      Top = 2040
+      Width = 1650
+      BackColor = &H00F0F0F0&
+      ForeColor = &H00000000&
+      Enabled = -1 'True
+      Visible = -1 'True
+      BeginProperty Font
+         Name = "Arial"
+         Size = 9
+         Charset = 0
+         Weight = 400
+         Underline = 0 'False
+         Italic = 0 'False
+         Strikethrough = 0 'False
+      EndProperty
+   End
 End
 Attribute VB_Name = "ConnorMoier"
 Attribute VB_GlobalNameSpace = False
@@ -46,4 +86,12 @@ Attribute VB_Exposed = False
 
 Private Sub connormoizer_click()
 MsgBox "This is fun"
+End Sub
+
+Private Sub ToggleButton1_Click()
+MsgBox "Prompt 2 "
+End Sub
+
+Private Sub ToggleButton2_Click()
+MsgBox "promt 3"
 End Sub
