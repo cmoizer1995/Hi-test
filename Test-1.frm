@@ -52,8 +52,8 @@ Begin {C62A69F0-16DC-11CE-9E98-00AA00574A4F} ConnorMoier
    Begin MSForms.ToggleButton ToggleButton2
       Caption = "Button 3 "
       Height = 480
-      Left = 240
-      Top = 1800
+      Left = 360
+      Top = 1920
       Width = 1650
       BackColor = &H00F0F0F0&
       ForeColor = &H00000000&
