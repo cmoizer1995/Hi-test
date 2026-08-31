@@ -1,0 +1,255 @@
+# CM-CODE-EDITOR-BUILD-WORKFLOW-V1
+# Source opened from Google Drive / Local Device is downloaded only for this
+# ephemeral run and is never committed to this repository or uploaded as an
+# Actions artifact.
+name: CM Code Editor Remote Build
+run-name: CM Build ${{ inputs.cm_build_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      cm_build_id:
+        description: CM build identifier
+        required: true
+        type: string
+      source_mode:
+        description: github or temporary
+        required: true
+        type: string
+      source_ref:
+        description: Git branch/ref for repository builds
+        required: false
+        default: ''
+        type: string
+      source_url:
+        description: One-time CM temporary source URL
+        required: false
+        default: ''
+        type: string
+      callback_url:
+        description: CM build callback endpoint
+        required: true
+        type: string
+      worker_token:
+        description: Short-lived callback token
+        required: true
+        type: string
+      language:
+        description: Active editor language
+        required: false
+        default: plaintext
+        type: string
+      entry_path:
+        description: Active file path
+        required: false
+        default: ''
+        type: string
+      runner_os:
+        description: GitHub hosted runner label
+        required: true
+        default: ubuntu-latest
+        type: string
+permissions:
+  contents: read
+jobs:
+  cm-build:
+    name: Build and test
+    runs-on: ${{ inputs.runner_os }}
+    timeout-minutes: 30
+    steps:
+      - name: Start CM remote build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-RestMethod -Method Post -Uri '${{ inputs.callback_url }}' -Body @{
+            op='progress'; build_id='${{ inputs.cm_build_id }}'; token='${{ inputs.worker_token }}';
+            message='GitHub Actions runner started · ${{ inputs.runner_os }}'
+          } | Out-Null
+
+      - name: Checkout repository source
+        if: ${{ inputs.source_mode == 'github' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 1
+
+      - name: Download temporary CM source
+        if: ${{ inputs.source_mode == 'temporary' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-RestMethod -Method Post -Uri '${{ inputs.callback_url }}' -Body @{
+            op='progress'; build_id='${{ inputs.cm_build_id }}'; token='${{ inputs.worker_token }}';
+            message='Downloading temporary source from CM Dashboard…'
+          } | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP 'cm-source.zip'
+          Invoke-WebRequest -UseBasicParsing -Uri '${{ inputs.source_url }}' -OutFile $zip
+          if (Test-Path $env:GITHUB_WORKSPACE) {
+            Get-ChildItem -Force $env:GITHUB_WORKSPACE | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          Expand-Archive -Path $zip -DestinationPath $env:GITHUB_WORKSPACE -Force
+          Remove-Item $zip -Force -ErrorAction SilentlyContinue
+          Invoke-RestMethod -Method Post -Uri '${{ inputs.callback_url }}' -Body @{
+            op='progress'; build_id='${{ inputs.cm_build_id }}'; token='${{ inputs.worker_token }}';
+            message='Temporary source received · no Git commit or Actions artifact created'
+          } | Out-Null
+
+      - name: Build and test source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location $env:GITHUB_WORKSPACE
+          $callback = '${{ inputs.callback_url }}'
+          $buildId = '${{ inputs.cm_build_id }}'
+          $token = '${{ inputs.worker_token }}'
+          $lang = '${{ inputs.language }}'.ToLowerInvariant()
+          $entry = '${{ inputs.entry_path }}'
+          $log = Join-Path $env:RUNNER_TEMP 'cm-build.log'
+          New-Item -ItemType File -Path $log -Force | Out-Null
+
+          function Cm-Progress([string]$text) {
+            try {
+              Invoke-RestMethod -Method Post -Uri $callback -Body @{
+                op='progress'; build_id=$buildId; token=$token; message=$text
+              } | Out-Null
+            } catch {}
+          }
+          function Cm-Run([string]$label, [string]$exe, [string[]]$commandArgs) {
+            Cm-Progress $label
+            ("> " + $exe + " " + ($commandArgs -join ' ')) | Tee-Object -FilePath $log -Append | Write-Host
+            $out = & $exe @commandArgs 2>&1
+            $exit = $LASTEXITCODE
+            $out | Tee-Object -FilePath $log -Append | ForEach-Object { Write-Host $_ }
+            if ($exit -ne 0) { throw "$label failed with exit code $exit." }
+          }
+
+          Cm-Progress ('Detecting project · language ' + $lang)
+
+          if ($lang -eq 'csharp' -or (Get-ChildItem -Recurse -Filter *.cs -File -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            $solution = Get-ChildItem -Recurse -Filter *.sln -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            $project = Get-ChildItem -Recurse -Filter *.csproj -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $solution -and -not $project) {
+              Cm-Progress 'Preparing temporary .NET project for standalone C# source…'
+              $allCs = Get-ChildItem -Recurse -Filter *.cs -File -ErrorAction SilentlyContinue
+              if (-not $allCs) { throw 'No C# source files were found.' }
+              $joined = ($allCs | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+              $winForms = $joined -match 'System\.Windows\.Forms|:\s*Form\b'
+              $tfm = if ($winForms) { 'net8.0-windows' } else { 'net8.0' }
+              $useForms = if ($winForms) { '<UseWindowsForms>true</UseWindowsForms><EnableWindowsTargeting>true</EnableWindowsTargeting>' } else { '' }
+              $projectXml = '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>' + $tfm + '</TargetFramework>' + $useForms + '<ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup></Project>'
+              $projectXml | Set-Content -Path 'CMTemporaryBuild.csproj' -Encoding UTF8
+              if ($joined -notmatch 'static\s+(?:void|int)\s+Main\s*\(') {
+                $formMatch = [regex]::Match($joined, 'class\s+([A-Za-z_]\w*)\s*:\s*(?:System\.Windows\.Forms\.)?Form\b')
+                if ($formMatch.Success) {
+                  $formName = $formMatch.Groups[1].Value
+                  $program = "using System;`nusing System.Windows.Forms;`ninternal static class CMGeneratedProgram {`n  [STAThread]`n  static void Main() { Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false); Application.Run(new $formName()); }`n}"
+                  $program | Set-Content -Path 'CMGeneratedProgram.cs' -Encoding UTF8
+                } else {
+                  'internal static class CMGeneratedProgram { static void Main() { } }' | Set-Content -Path 'CMGeneratedProgram.cs' -Encoding UTF8
+                }
+              }
+              $project = Get-Item 'CMTemporaryBuild.csproj'
+            }
+            $target = if ($solution) { $solution.FullName } else { $project.FullName }
+            Cm-Run 'Restoring .NET packages…' 'dotnet' @('restore', $target)
+            Cm-Run 'Building C# / .NET project…' 'dotnet' @('build', $target, '--configuration', 'Release', '--no-restore')
+            $tests = Get-ChildItem -Recurse -Filter *.csproj -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)test' }
+            foreach ($test in $tests) { Cm-Run ('Testing ' + $test.Name + '…') 'dotnet' @('test', $test.FullName, '--configuration', 'Release', '--no-build') }
+          }
+          elseif (Test-Path 'package.json') {
+            if (Test-Path 'package-lock.json') { Cm-Run 'Installing Node packages with npm ci…' 'npm' @('ci') }
+            else { Cm-Run 'Installing Node packages…' 'npm' @('install') }
+            Cm-Run 'Running JavaScript/Node tests…' 'npm' @('test','--if-present')
+            Cm-Run 'Running JavaScript/Node build…' 'npm' @('run','build','--if-present')
+          }
+          elseif ($lang -eq 'python' -or (Get-ChildItem -Recurse -Filter *.py -File -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            if (Test-Path 'requirements.txt') { Cm-Run 'Installing Python requirements…' 'python' @('-m','pip','install','-r','requirements.txt') }
+            Cm-Run 'Checking Python source…' 'python' @('-m','compileall','-q','.')
+            if ((Test-Path 'tests') -or (Test-Path 'pytest.ini') -or (Test-Path 'pyproject.toml')) {
+              try { Cm-Run 'Running Python tests…' 'python' @('-m','pytest','-q') } catch {
+                if ($_.Exception.Message -match 'No module named pytest') {
+                  Cm-Run 'Installing pytest…' 'python' @('-m','pip','install','pytest')
+                  Cm-Run 'Running Python tests…' 'python' @('-m','pytest','-q')
+                } else { throw }
+              }
+            }
+          }
+          elseif ($lang -eq 'php' -or (Get-ChildItem -Recurse -Filter *.php -File -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            $phpFiles = Get-ChildItem -Recurse -Filter *.php -File
+            foreach ($file in $phpFiles) { Cm-Run ('PHP syntax · ' + $file.Name) 'php' @('-l', $file.FullName) }
+          }
+          elseif (Test-Path 'go.mod') {
+            Cm-Run 'Running Go tests…' 'go' @('test','./...')
+            Cm-Run 'Building Go project…' 'go' @('build','./...')
+          }
+          elseif (Test-Path 'Cargo.toml') {
+            Cm-Run 'Running Rust tests…' 'cargo' @('test','--quiet')
+            Cm-Run 'Building Rust release…' 'cargo' @('build','--release','--quiet')
+          }
+          elseif ((Test-Path 'gradlew') -or (Test-Path 'pom.xml')) {
+            if (Test-Path 'gradlew') { Cm-Run 'Running Gradle tests/build…' './gradlew' @('test','build') }
+            else { Cm-Run 'Running Maven tests/build…' 'mvn' @('-B','test','package') }
+          }
+          elseif ($lang -eq 'c' -or $lang -eq 'cpp') {
+            if (Test-Path 'Makefile') { Cm-Run 'Running make…' 'make' @() }
+            elseif ($entry -and (Test-Path $entry)) {
+              $compiler = if ($entry -match '\.(?:cc|cpp|cxx)$') { 'g++' } else { 'gcc' }
+              Cm-Run 'Compiling C/C++ source…' $compiler @($entry,'-o','cm-build-output')
+            } else { throw 'Open a C/C++ entry file or include a Makefile.' }
+          }
+          elseif ($lang -eq 'powershell') {
+            Cm-Progress 'Checking PowerShell syntax…'
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $entry), [ref]$null, [ref]$errors) | Out-Null
+            if ($errors.Count) { $errors | Out-File -FilePath $log -Append; throw 'PowerShell syntax check failed.' }
+          }
+          elseif ($lang -eq 'shell') {
+            Cm-Run 'Checking shell syntax…' 'bash' @('-n',$entry)
+          }
+          elseif ($lang -eq 'bat') {
+            Cm-Progress 'Windows Batch source staged. CM remote Build does not execute arbitrary .bat files automatically.'
+          }
+          else {
+            if ($lang -eq 'json' -and $entry -and (Test-Path $entry)) {
+              Cm-Progress 'Validating JSON…'
+              Get-Content $entry -Raw | ConvertFrom-Json | Out-Null
+            }
+            Cm-Progress 'No compiler-specific project file detected; packaging the validated workspace.'
+          }
+
+          Cm-Progress 'Build/tests passed · packaging result…'
+          'CM build completed successfully.' | Tee-Object -FilePath $log -Append | Write-Host
+
+      - name: Package successful build
+        if: ${{ success() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:RUNNER_TEMP 'cm-build-result'
+          $zip = Join-Path $env:RUNNER_TEMP ('CM-Build-${{ inputs.cm_build_id }}.zip')
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Get-ChildItem -Force $env:GITHUB_WORKSPACE | Where-Object { $_.Name -notin @('.git','node_modules') } | ForEach-Object {
+            Copy-Item $_.FullName -Destination $stage -Recurse -Force
+          }
+          $log = Join-Path $env:RUNNER_TEMP 'cm-build.log'
+          if (Test-Path $log) { Copy-Item $log (Join-Path $stage 'CM-Build.log') -Force }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal -Force
+          Invoke-RestMethod -Method Post -Uri '${{ inputs.callback_url }}' -Body @{
+            op='progress'; build_id='${{ inputs.cm_build_id }}'; token='${{ inputs.worker_token }}';
+            message='Build package ready · returning it to CM Code Editor…'
+          } | Out-Null
+          Invoke-WebRequest -UseBasicParsing -Method Post -Uri '${{ inputs.callback_url }}' -Form @{
+            op='result'; build_id='${{ inputs.cm_build_id }}'; token='${{ inputs.worker_token }}'; result=(Get-Item $zip)
+          } | Out-Null
+
+      - name: Return build error to CM
+        if: ${{ failure() }}
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'cm-build.log'
+          $text = if (Test-Path $log) { (Get-Content $log -Tail 220) -join "`n" } else { 'GitHub Actions reported that the build failed. Open the CM Terminal for the failed step.' }
+          if ($text.Length -gt 30000) { $text = $text.Substring($text.Length - 30000) }
+          try {
+            Invoke-RestMethod -Method Post -Uri '${{ inputs.callback_url }}' -Body @{
+              op='failure'; build_id='${{ inputs.cm_build_id }}'; token='${{ inputs.worker_token }}'; error=$text
+            } | Out-Null
+          } catch {}
