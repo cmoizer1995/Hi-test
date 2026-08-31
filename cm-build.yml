@@ -1,0 +1,31 @@
+name: CM Remote Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: CM build ID
+        required: true
+      language:
+        description: Project language
+        required: true
+      source_url:
+        description: Temporary CM source package
+        required: false
+      callback_url:
+        description: CM result callback
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Show build
+        run: echo "Starting CM build ${{ inputs.build_id }}"
+
+      - name: Download temporary source
+        if: ${{ inputs.source_url != '' }}
+        run: |
+          curl -L "${{ inputs.source_url }}" -o cm-source.zip
+          unzip cm-source.zip -d project
