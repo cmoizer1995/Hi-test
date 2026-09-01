@@ -93,6 +93,13 @@ jobs:
             message='Temporary source received · no Git commit or Actions artifact created'
           } | Out-Null
 
+      - name: Set up Flutter SDK
+        if: ${{ inputs.language == 'flutter' || inputs.language == 'dart' }}
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
       - name: Build and test source
         shell: pwsh
         run: |
@@ -176,6 +183,16 @@ jobs:
           elseif ($lang -eq 'php' -or (Get-ChildItem -Recurse -Filter *.php -File -ErrorAction SilentlyContinue | Select-Object -First 1)) {
             $phpFiles = Get-ChildItem -Recurse -Filter *.php -File
             foreach ($file in $phpFiles) { Cm-Run ('PHP syntax · ' + $file.Name) 'php' @('-l', $file.FullName) }
+          }
+          elseif ($lang -eq 'flutter' -or ((Test-Path 'pubspec.yaml') -and ((Get-Content 'pubspec.yaml' -Raw) -match '(?ms)^flutter:\s*$.*?sdk:\s*flutter'))) {
+            Cm-Run 'Resolving Flutter packages…' 'flutter' @('pub','get')
+            Cm-Run 'Analyzing Flutter project…' 'flutter' @('analyze')
+            if (Test-Path 'test') { Cm-Run 'Running Flutter tests…' 'flutter' @('test') }
+            Cm-Run 'Building Flutter web release…' 'flutter' @('build','web','--release')
+          }
+          elseif ($lang -eq 'dart') {
+            Cm-Run 'Analyzing Dart source…' 'dart' @('analyze','.')
+            if ($entry -and (Test-Path $entry)) { Cm-Run 'Running Dart entry file…' 'dart' @('run',$entry) }
           }
           elseif (Test-Path 'go.mod') {
             Cm-Run 'Running Go tests…' 'go' @('test','./...')
