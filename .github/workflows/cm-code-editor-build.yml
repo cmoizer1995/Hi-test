@@ -43,10 +43,20 @@ on:
         required: false
         default: ''
         type: string
+      target_platform:
+        description: Flutter export target (ios or android)
+        required: false
+        default: ''
+        type: string
       runner_os:
         description: GitHub hosted runner label
         required: true
         default: ubuntu-latest
+        type: string
+      hot_session:
+        description: Keep a live Flutter debug session for stateful hot reload
+        required: false
+        default: '0'
         type: string
 permissions:
   contents: read
@@ -94,7 +104,7 @@ jobs:
           } | Out-Null
 
       - name: Set up Flutter SDK
-        if: ${{ inputs.language == 'flutter' || inputs.language == 'dart' }}
+        if: ${{ inputs.language == 'dart' }}
         uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -110,6 +120,8 @@ jobs:
           $token = '${{ inputs.worker_token }}'
           $lang = '${{ inputs.language }}'.ToLowerInvariant()
           $entry = '${{ inputs.entry_path }}'
+          $targetPlatform = '${{ inputs.target_platform }}'.ToLowerInvariant()
+          $hotSession = '${{ inputs.hot_session }}' -eq '1'
           $log = Join-Path $env:RUNNER_TEMP 'cm-build.log'
           New-Item -ItemType File -Path $log -Force | Out-Null
 
@@ -129,9 +141,263 @@ jobs:
             if ($exit -ne 0) { throw "$label failed with exit code $exit." }
           }
 
+          function Cm-HotApplyPlatform([string]$file) {
+            if (-not $file -or -not (Test-Path $file)) { return }
+            $previewPlatform = if ($targetPlatform -eq 'web-android') { 'android' } else { 'ios' }
+            $src = Get-Content $file -Raw
+            if ($src -notmatch "package:flutter/foundation\.dart") {
+              $src = "import 'package:flutter/foundation.dart';`n" + $src
+            }
+            $platformExpr = if ($previewPlatform -eq 'android') { 'TargetPlatform.android' } else { 'TargetPlatform.iOS' }
+            if ($src -match '(?s)\b(?:Future<\s*void\s*>|void)\s+main\s*\(\s*\)\s*(?:async\s*)?\{') {
+              $src = [regex]::Replace($src,'(?s)(\b(?:Future<\s*void\s*>|void)\s+main\s*\(\s*\)\s*(?:async\s*)?\{)',('$1' + "`n  debugDefaultTargetPlatformOverride = " + $platformExpr + ';'),1)
+            } elseif ($src -match '(?s)\bvoid\s+main\s*\(\s*\)\s*=>\s*([^;]+);') {
+              $src = [regex]::Replace($src,'(?s)\bvoid\s+main\s*\(\s*\)\s*=>\s*([^;]+);',('void main() {' + "`n  debugDefaultTargetPlatformOverride = " + $platformExpr + ';' + "`n  " + '$1;' + "`n}"),1)
+            }
+            $src | Set-Content -Path $file -Encoding UTF8
+          }
+
+          function Cm-RunFlutterHotSession {
+            Cm-Progress 'Starting persistent Flutter debug session for stateful hot reload…'
+            $flutter = 'flutter'
+            Cm-Run 'Reading Flutter toolchain…' $flutter @('--version')
+            $dartFiles = Get-ChildItem -Recurse -Filter *.dart -File -ErrorAction SilentlyContinue
+            if (-not $dartFiles) { throw 'No Dart source files were found.' }
+            if (-not (Test-Path 'pubspec.yaml')) {
+              Cm-Progress 'Creating temporary Flutter project shell for hot reload…'
+              $entrySource = if ($entry -and (Test-Path $entry)) { Get-Content $entry -Raw } else { Get-Content $dartFiles[0].FullName -Raw }
+              $tmpProject = Join-Path $env:RUNNER_TEMP 'cm-flutter-hot-project'
+              New-Item -ItemType Directory -Path $tmpProject -Force | Out-Null
+              Push-Location $tmpProject
+              Cm-Run 'Creating Flutter project structure…' $flutter @('create','--project-name','cm_flutter_hot','.')
+              Pop-Location
+              Get-ChildItem -Force $tmpProject | ForEach-Object { Copy-Item $_.FullName -Destination $env:GITHUB_WORKSPACE -Recurse -Force }
+              New-Item -ItemType Directory -Path (Join-Path $env:GITHUB_WORKSPACE 'lib') -Force | Out-Null
+              $entrySource | Set-Content -Path (Join-Path $env:GITHUB_WORKSPACE 'lib/main.dart') -Encoding UTF8
+              Set-Location $env:GITHUB_WORKSPACE
+            }
+            Cm-Run 'Getting Flutter packages…' $flutter @('pub','get')
+            $mainFile = if ($entry -and (Test-Path $entry)) { (Resolve-Path $entry).Path } elseif (Test-Path 'lib/main.dart') { (Resolve-Path 'lib/main.dart').Path } else { $dartFiles[0].FullName }
+            Cm-HotApplyPlatform $mainFile
+
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = 'flutter'
+            $psi.Arguments = 'run -d web-server --web-hostname 127.0.0.1 --web-port 7357'
+            $psi.WorkingDirectory = $env:GITHUB_WORKSPACE
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $flutterProc = New-Object System.Diagnostics.Process
+            $flutterProc.StartInfo = $psi
+            if (-not $flutterProc.Start()) { throw 'Flutter debug server did not start.' }
+            $outSource = 'cm-flutter-out-' + $buildId
+            $errSource = 'cm-flutter-err-' + $buildId
+            Register-ObjectEvent -InputObject $flutterProc -EventName OutputDataReceived -SourceIdentifier $outSource | Out-Null
+            Register-ObjectEvent -InputObject $flutterProc -EventName ErrorDataReceived -SourceIdentifier $errSource | Out-Null
+            $flutterProc.BeginOutputReadLine()
+            $flutterProc.BeginErrorReadLine()
+
+            function Cm-HotDrainOutput {
+              $lines = New-Object System.Collections.Generic.List[string]
+              foreach ($sid in @($outSource,$errSource)) {
+                foreach ($ev in @(Get-Event -SourceIdentifier $sid -ErrorAction SilentlyContinue)) {
+                  $line = [string]$ev.SourceEventArgs.Data
+                  if ($line) { $lines.Add($line); $line | Out-File -FilePath $log -Append -Encoding utf8 }
+                  Remove-Event -EventIdentifier $ev.EventIdentifier -ErrorAction SilentlyContinue
+                }
+              }
+              return ,$lines.ToArray()
+            }
+
+            $ready = $false
+            for ($i=0; $i -lt 120; $i++) {
+              if ($flutterProc.HasExited) { throw 'Flutter debug server exited before it became ready.' }
+              try { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:7357/' -TimeoutSec 2 | Out-Null; $ready=$true; break } catch {}
+              Start-Sleep -Milliseconds 500
+            }
+            if (-not $ready) { throw 'Flutter debug server did not become ready in time.' }
+
+            $cf = Join-Path $env:RUNNER_TEMP 'cloudflared'
+            Cm-Progress 'Opening secure temporary preview tunnel…'
+            Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64' -OutFile $cf
+            & chmod +x $cf
+            $cfLog = Join-Path $env:RUNNER_TEMP 'cm-cloudflared.err.log'
+            $cfOut = Join-Path $env:RUNNER_TEMP 'cm-cloudflared.out.log'
+            $cfProc = Start-Process -FilePath $cf -ArgumentList @('tunnel','--url','http://127.0.0.1:7357','--no-autoupdate') -RedirectStandardError $cfLog -RedirectStandardOutput $cfOut -PassThru
+            $publicUrl = ''
+            for ($i=0; $i -lt 120; $i++) {
+              if (Test-Path $cfLog) {
+                $m = [regex]::Match((Get-Content $cfLog -Raw),'https://[a-z0-9-]+\.trycloudflare\.com')
+                if ($m.Success) { $publicUrl=$m.Value; break }
+              }
+              if ($cfProc.HasExited) { break }
+              Start-Sleep -Milliseconds 500
+            }
+            if (-not $publicUrl) { throw 'The temporary Flutter preview tunnel could not be opened.' }
+
+            Invoke-RestMethod -Method Post -Uri $callback -Body @{op='hot_ready';build_id=$buildId;token=$token;url=$publicUrl} | Out-Null
+            Cm-Progress ('Flutter hot reload session ready · ' + $publicUrl)
+
+            $lastRevision = 0
+            for ($tick=0; $tick -lt 1500; $tick++) {
+              if ($flutterProc.HasExited) { throw 'Flutter debug session stopped unexpectedly.' }
+              Start-Sleep -Milliseconds 900
+              try {
+                $poll = Invoke-RestMethod -Method Post -Uri $callback -Body @{op='hot_poll';build_id=$buildId;token=$token;revision=$lastRevision}
+              } catch { continue }
+              if (-not $poll.success) { continue }
+              $d = $poll.data
+              if ($d.stop) { break }
+              $rev = [int]$d.revision
+              if ($rev -le $lastRevision) { continue }
+              foreach ($u in @($d.updates)) {
+                $rel = [string]$u.path
+                if (-not $rel -or $rel.Contains('..')) { continue }
+                $target = Join-Path $env:GITHUB_WORKSPACE ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)
+                $full = [IO.Path]::GetFullPath($target)
+                $rootFull = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE + [IO.Path]::DirectorySeparatorChar)
+                if (-not $full.StartsWith($rootFull,[StringComparison]::OrdinalIgnoreCase)) { continue }
+                New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($full)) -Force | Out-Null
+                $bytes = [Convert]::FromBase64String([string]$u.content_b64)
+                [IO.File]::WriteAllBytes($full,$bytes)
+                if ($full -eq $mainFile) { Cm-HotApplyPlatform $mainFile }
+              }
+              Cm-HotDrainOutput | Out-Null
+              $flutterProc.StandardInput.WriteLine('r')
+              $flutterProc.StandardInput.Flush()
+              $reloadOk = $false
+              $reloadError = ''
+              $reloadLines = New-Object System.Collections.Generic.List[string]
+              for ($wait=0; $wait -lt 80; $wait++) {
+                Start-Sleep -Milliseconds 200
+                foreach ($line in @(Cm-HotDrainOutput)) {
+                  if (-not $line) { continue }
+                  $reloadLines.Add($line)
+                  if ($line -match '(?i)Reloaded\s+\d+\s+of\s+\d+\s+libraries|Hot reload complete|Reloaded\s+\d+\s+libraries') { $reloadOk=$true }
+                  if ($line -match '(?i)Try again after fixing|Compilation failed|Failed to compile|\bError:\s') { $reloadError=$line }
+                }
+                if ($reloadError -or $reloadOk) { break }
+              }
+              if ($reloadError) {
+                $tail = ($reloadLines | Select-Object -Last 30) -join "`n"
+                if (-not $tail) { $tail=$reloadError }
+                Invoke-RestMethod -Method Post -Uri $callback -Body @{op='hot_error';build_id=$buildId;token=$token;revision=$rev;error=$tail} | Out-Null
+                Cm-Progress ('Flutter hot reload rejected revision ' + $rev + ' · fix the Dart error and keep typing')
+              } elseif ($reloadOk) {
+                $lastRevision = $rev
+                Invoke-RestMethod -Method Post -Uri $callback -Body @{op='hot_applied';build_id=$buildId;token=$token;revision=$lastRevision} | Out-Null
+                Cm-Progress ('Flutter hot reload applied · revision ' + $lastRevision)
+              } else {
+                $tail = ($reloadLines | Select-Object -Last 20) -join "`n"
+                Invoke-RestMethod -Method Post -Uri $callback -Body @{op='hot_error';build_id=$buildId;token=$token;revision=$rev;error=('Flutter did not confirm hot reload completion within 16 seconds.' + $(if($tail){"`n"+$tail}else{''}))} | Out-Null
+              }
+            }
+
+            try { $flutterProc.StandardInput.WriteLine('q'); $flutterProc.StandardInput.Flush() } catch {}
+            try { if (-not $flutterProc.WaitForExit(5000)) { $flutterProc.Kill($true) } } catch {}
+            try { if ($cfProc -and -not $cfProc.HasExited) { Stop-Process -Id $cfProc.Id -Force } } catch {}
+            try { Unregister-Event -SourceIdentifier $outSource -ErrorAction SilentlyContinue; Unregister-Event -SourceIdentifier $errSource -ErrorAction SilentlyContinue } catch {}
+            try {
+              Invoke-RestMethod -Method Post -Uri $callback -Body @{op='hot_stopped';build_id=$buildId;token=$token} | Out-Null
+            } catch {}
+            Cm-Progress 'Flutter hot reload session stopped.'
+          }
+
+          if ($hotSession) {
+            Cm-RunFlutterHotSession
+            exit 0
+          }
+
           Cm-Progress ('Detecting project · language ' + $lang)
 
-          if ($lang -eq 'csharp' -or (Get-ChildItem -Recurse -Filter *.cs -File -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+          if ($lang -eq 'dart' -or (Test-Path 'pubspec.yaml') -or (Get-ChildItem -Recurse -Filter *.dart -File -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            $dartFiles = Get-ChildItem -Recurse -Filter *.dart -File -ErrorAction SilentlyContinue
+            if (-not $dartFiles) { throw 'No Dart source files were found.' }
+            $flutterSource = ($dartFiles | ForEach-Object { Get-Content $_.FullName -Raw }) -join "`n"
+            $isFlutter = (Test-Path 'pubspec.yaml') -or ($flutterSource -match 'package:flutter/(?:material|widgets|cupertino)\.dart')
+            if (-not $isFlutter) {
+              Cm-Progress 'Plain Dart source validated. No Flutter app build was requested.'
+            } else {
+              Cm-Progress ('Using real Flutter SDK for ' + $targetPlatform + ' build…')
+              $flutter = 'flutter'
+              Cm-Run 'Reading Flutter toolchain…' $flutter @('--version')
+              if (-not (Test-Path 'pubspec.yaml')) {
+                Cm-Progress 'Creating temporary Flutter project shell around the open Dart source…'
+                $entrySource = if ($entry -and (Test-Path $entry)) { Get-Content $entry -Raw } else { Get-Content $dartFiles[0].FullName -Raw }
+                $tmpProject = Join-Path $env:RUNNER_TEMP 'cm-flutter-project'
+                New-Item -ItemType Directory -Path $tmpProject -Force | Out-Null
+                Push-Location $tmpProject
+                Cm-Run 'Creating Flutter project structure…' $flutter @('create','--project-name','cm_flutter_export','.')
+                Pop-Location
+                Get-ChildItem -Force $tmpProject | ForEach-Object { Copy-Item $_.FullName -Destination $env:GITHUB_WORKSPACE -Recurse -Force }
+                New-Item -ItemType Directory -Path (Join-Path $env:GITHUB_WORKSPACE 'lib') -Force | Out-Null
+                $entrySource | Set-Content -Path (Join-Path $env:GITHUB_WORKSPACE 'lib/main.dart') -Encoding UTF8
+                Set-Location $env:GITHUB_WORKSPACE
+              }
+              Cm-Run 'Getting Flutter packages…' $flutter @('pub','get')
+              Cm-Run 'Analysing Flutter source…' $flutter @('analyze','--no-fatal-infos')
+              if ($targetPlatform -eq 'web' -or $targetPlatform -eq 'web-ios' -or $targetPlatform -eq 'web-android') {
+                $previewPlatform = if ($targetPlatform -eq 'web-android') { 'android' } elseif ($targetPlatform -eq 'web-ios') { 'ios' } else { '' }
+
+                # Device Presentation must execute Flutter itself, but browser-hosted
+                # Flutter otherwise adopts the browser's host platform. For the
+                # simulator lane only, alter the ephemeral runner copy of main.dart
+                # so Flutter's supported debug platform override matches the selected
+                # Apple or Android device. The user's real source is never modified.
+                $previewMain = if ($entry -and (Test-Path $entry)) { (Resolve-Path $entry).Path } elseif (Test-Path 'lib/main.dart') { (Resolve-Path 'lib/main.dart').Path } else { $dartFiles[0].FullName }
+                $previewBackup = ''
+                if ($previewPlatform -and $previewMain) {
+                  $previewBackup = $previewMain + '.cm-device-original'
+                  Copy-Item $previewMain $previewBackup -Force
+                  $src = Get-Content $previewMain -Raw
+                  if ($src -notmatch "package:flutter/foundation\.dart") {
+                    $src = "import 'package:flutter/foundation.dart';`n" + $src
+                  }
+                  $platformExpr = if ($previewPlatform -eq 'android') { 'TargetPlatform.android' } else { 'TargetPlatform.iOS' }
+                  if ($src -match '(?s)\b(?:Future<\s*void\s*>|void)\s+main\s*\(\s*\)\s*(?:async\s*)?\{') {
+                    $src = [regex]::Replace(
+                      $src,
+                      '(?s)(\b(?:Future<\s*void\s*>|void)\s+main\s*\(\s*\)\s*(?:async\s*)?\{)',
+                      ('$1' + "`n  debugDefaultTargetPlatformOverride = " + $platformExpr + ';'),
+                      1
+                    )
+                  } elseif ($src -match '(?s)\bvoid\s+main\s*\(\s*\)\s*=>\s*([^;]+);') {
+                    $src = [regex]::Replace(
+                      $src,
+                      '(?s)\bvoid\s+main\s*\(\s*\)\s*=>\s*([^;]+);',
+                      ('void main() {' + "`n  debugDefaultTargetPlatformOverride = " + $platformExpr + ';' + "`n  " + '$1;' + "`n}"),
+                      1
+                    )
+                  } else {
+                    throw 'CM could not apply the temporary platform override because main() uses an unsupported declaration shape.'
+                  }
+                  $src | Set-Content -Path $previewMain -Encoding UTF8
+                  Cm-Progress ('Device Presentation Flutter platform override · ' + $previewPlatform)
+                }
+
+                try {
+                  if ($previewPlatform -eq 'android') {
+                    Cm-Progress 'Validating the same project with the real Android toolchain…'
+                    Cm-Run 'Building Android debug APK for validation…' $flutter @('build','apk','--debug')
+                  }
+                  Cm-Progress ('Building real Flutter Web runtime for Device Presentation' + $(if($previewPlatform){' · '+$previewPlatform}else{''}) + '…')
+                  Cm-Run 'Building Flutter Web debug app…' $flutter @('build','web','--debug')
+                } finally {
+                  if ($previewBackup -and (Test-Path $previewBackup)) {
+                    Copy-Item $previewBackup $previewMain -Force
+                    Remove-Item $previewBackup -Force -ErrorAction SilentlyContinue
+                  }
+                }
+              } elseif ($targetPlatform -eq 'ios') {
+                if (-not $IsMacOS) { throw 'Flutter iOS export requires the macOS GitHub Actions runner.' }
+                Cm-Run 'Building Flutter iOS app (no codesign)…' $flutter @('build','ios','--release','--no-codesign')
+              } else {
+                Cm-Run 'Building Flutter Android APK…' $flutter @('build','apk','--release')
+              }
+            }
+          }
+          elseif ($lang -eq 'csharp' -or (Get-ChildItem -Recurse -Filter *.cs -File -ErrorAction SilentlyContinue | Select-Object -First 1)) {
             $solution = Get-ChildItem -Recurse -Filter *.sln -File -ErrorAction SilentlyContinue | Select-Object -First 1
             $project = Get-ChildItem -Recurse -Filter *.csproj -File -ErrorAction SilentlyContinue | Select-Object -First 1
             if (-not $solution -and -not $project) {
@@ -184,16 +450,6 @@ jobs:
             $phpFiles = Get-ChildItem -Recurse -Filter *.php -File
             foreach ($file in $phpFiles) { Cm-Run ('PHP syntax · ' + $file.Name) 'php' @('-l', $file.FullName) }
           }
-          elseif ($lang -eq 'flutter' -or ((Test-Path 'pubspec.yaml') -and ((Get-Content 'pubspec.yaml' -Raw) -match '(?ms)^flutter:\s*$.*?sdk:\s*flutter'))) {
-            Cm-Run 'Resolving Flutter packages…' 'flutter' @('pub','get')
-            Cm-Run 'Analyzing Flutter project…' 'flutter' @('analyze')
-            if (Test-Path 'test') { Cm-Run 'Running Flutter tests…' 'flutter' @('test') }
-            Cm-Run 'Building Flutter web release…' 'flutter' @('build','web','--release')
-          }
-          elseif ($lang -eq 'dart') {
-            Cm-Run 'Analyzing Dart source…' 'dart' @('analyze','.')
-            if ($entry -and (Test-Path $entry)) { Cm-Run 'Running Dart entry file…' 'dart' @('run',$entry) }
-          }
           elseif (Test-Path 'go.mod') {
             Cm-Run 'Running Go tests…' 'go' @('test','./...')
             Cm-Run 'Building Go project…' 'go' @('build','./...')
@@ -237,7 +493,7 @@ jobs:
           'CM build completed successfully.' | Tee-Object -FilePath $log -Append | Write-Host
 
       - name: Package successful build
-        if: ${{ success() }}
+        if: ${{ success() && inputs.hot_session != '1' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
